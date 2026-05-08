@@ -1,6 +1,7 @@
 # Wordle in C++ Plus
 
-这是原大一 Wordle 小游戏的增强版。为了保留回忆，旧代码已经完整备份到 `legacy/Wordle Plus 2022.cpp`；根目录的 `Wordle Plus.cpp` 是新的跨平台版本。
+大一计算机程序设计课程作业 Wordle 小游戏的增强版。
+为了保留回忆，旧代码已经完整备份到 `legacy/Wordle Plus 2022.cpp`；根目录的 `Wordle Plus.cpp` 是新的跨平台版本。
 
 ## 新增功能
 
