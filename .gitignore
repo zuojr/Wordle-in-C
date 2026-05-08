@@ -1,0 +1,4 @@
+wordle_plus
+.wordle_stats
+*.exe
+*.o
