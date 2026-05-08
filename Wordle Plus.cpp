@@ -1,603 +1,531 @@
-#define _CRT_SECURE_NO_WARNINGS
-//Used for exit constants mostly
-#include <stdlib.h>
-//printf and puts
-#include <stdio.h>
-//string comparison functions
-#include <string.h>
-//Used for the function 'toLower' 
-#include <ctype.h> 
-//Used to present the outcomes with different colors && play background music
-#include <windows.h>
-//Used for getch() in double-player mode
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cctype>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#ifdef _WIN32
 #include <conio.h>
-//Used to seed the rng for random games && calculate the game time
-#include <time.h>
-//Used to play background music
-#include<mmsystem.h>
-#pragma  comment (lib,"Winmm.lib") 
-
-
-//Length of a answer.
-//Note: You cannot change this without changing the answer list too.
-//You also must adapt the scanf calls for the new length
-#define answer_LENGTH 5
-//Number of tries allowed to find the answer
-#define MAX_TRIES 6
-//Number of characters in the alphabet + 1
-#define ALPHA_SIZE 27
-//If set, the answer and a few stats are printed before the game starts
-//#define DEBUG
-//Number of answers in the all potential answer list + 1
-#define ALL_SIZE 12948
-//Number of answers in the solution list + 1
-#define SOLUTION_SIZE 2316
-//Note: CRLF is also used for telnet.
-//If you want to make it available in a BBS you may want to force a CRLF
-#ifdef WIN32
-#define EOL "\r\n"
+#include <windows.h>
 #else
-#define EOL "\n"
+#include <termios.h>
+#include <unistd.h>
 #endif
 
+namespace {
 
-//Files for lists that contain all answers and solutions
-FILE * fpA,  * fpS;
-//Number of answers in the solution list
-long answerNum = 0;
-//The numbers of attempts 
-int AttemptNum = 0;
-//Selected answer from solution list
-char answer[answer_LENGTH + 1] = {0};
-//Possible characters (used to show unused characters)
-//The size specifier is necessary or its value will be readonly
-char alpha[ALPHA_SIZE] ={"abcdefghijklmnopqrstuvwxyz"};
-char ALPHA[ALPHA_SIZE] ={"abcdefghijklmnopqrstuvwxyz"};
-//Memory cache:
-//0-25 File position in the complete list with answers that start with the given letter a-z
-//26: Number of answers in the solution list
-long MemCache[ALPHA_SIZE];
+constexpr int kWordLength = 5;
+constexpr int kMaxTries = 6;
+const char *kAllWordsFile = "ALL.TXT";
+const char *kSolutionFile = "SOLUTION.TXT";
+const char *kStatsFile = ".wordle_stats";
 
+const char *kGreen = "\033[48;5;2m\033[30m";
+const char *kYellow = "\033[48;5;3m\033[30m";
+const char *kGray = "\033[48;5;240m\033[37m";
+const char *kRed = "\033[48;5;1m\033[37m";
+const char *kReset = "\033[0m";
 
-//Checks the entered answer against the solution
-int answerChecker(const char* guess);
-//Removes characters in the supplied argument from the alphabet
-int toLower(char* str);
-//Checks if the entered string is a potentially valid answer
-int allLetter(const char* answer);
-//Checks if the supplied answer is in the list
-int inList(const char * answer);
-//Runs the main game loop.Removes characters in the supplied argument from the alphabet
-//gameloop for single mode
-void wordleLoop_single(void);
-//gameloop for double mode
-int wordleLoop_double(void);
-//Runs the menu
-int menu(void);
-//Shows the help text
-void help(void);
-//Get a answer from ALL.TXT randomly
-void random(void);
-//Choose the game mode(single player or double player)
-int modeChooser(void);
-//Pick the given answer
-int pickAnswer(char * answer, int index);
-//Play background music
-void playMusic(void);
-//Input the answer in double-player mode with a '*' presented on the screen
-void Answer(char *word, int Len);
+struct Dictionary {
+    std::vector<std::string> solutions;
+    std::unordered_set<std::string> allowed;
+};
 
+struct GuessResult {
+    std::array<int, kWordLength> marks{}; // 0 gray, 1 yellow, 2 green
+};
 
-int main(){
-	fpA = fopen("D:\\ALL.TXT", "r");
-	fpS = fopen("D:\\SOLUTION.TXT", "r");
-	//Play background music
-	playMusic();
-	//Choose game mode£¨singleplayer or doubleplayer)
-	int l = modeChooser();
-	if(l < 0){
-		return EXIT_SUCCESS;
-	}
-	else if(l > 0){
-	    fclose(fpA);
-		fclose(fpS);	
-		return 0;
-	}
-	else{
-		int z;
-		while(l == 0){
-			z = modeChooser();
-			if(z < 0){
-				return EXIT_SUCCESS;
-			}
-			else if(z > 0){
-	    		fclose(fpA);
-				fclose(fpS);	
-				return 0;
-			}
-			else{
-				continue;
-			}
-		}	
-	}
+struct GameOptions {
+    bool hardMode = false;
+    bool dailyMode = false;
+    bool quietAnswer = false;
+};
+
+struct GameResult {
+    bool won = false;
+    int attempts = 0;
+    std::string answer;
+    std::vector<std::string> guesses;
+    std::vector<GuessResult> results;
+    bool quietAnswer = false;
+};
+
+struct Stats {
+    int played = 0;
+    int wins = 0;
+    int currentStreak = 0;
+    int bestStreak = 0;
+    int distribution[kMaxTries + 1]{};
+};
+
+std::string trimAndLower(std::string word) {
+    std::string out;
+    for (unsigned char ch : word) {
+        if (std::isalpha(ch)) {
+            out.push_back(static_cast<char>(std::tolower(ch)));
+        }
+    }
+    return out;
 }
 
-
-int modeChooser(){
-	int gamenum;
-    gamenum = menu();
-    //single mode
-    if (gamenum > 0) {
-		pickAnswer(answer, gamenum);
-		#ifdef DEBUG
-		//printf("answer: %s" EOL, answer);
-		#endif
-		//Randomly get a answer
-		random();
-		//puts(answer);
-		//Calculate game time
-		clock_t start, end;
-		start = clock();
-		wordleLoop_single();
-		end = clock();
-		float time = (end - start) / CLOCKS_PER_SEC;
-		printf("time = %2f seconds\n",time);
-		return 1;
-	} 
-	//double mode
-	else if(gamenum == 0){
-		int round;
-		int outcome_1,outcome_2;
-		int AttemptNum_1,AttemptNum_2;
-		float time_1,time_2;
-		for(round = 1;round < 3;round ++){
-			printf("Player %d , please enter your answer.\n",round);
-			Answer(answer, answer_LENGTH + 1);
-			toLower(answer);
-			if(allLetter(answer) && inList(answer)){
-				printf("Player %d , now start your game!\n" ,3 - round);
-				//Calculate game time
-				clock_t start, end;
-				start = clock();
-				if(round == 1){
-					outcome_1 = wordleLoop_double();
-					AttemptNum_1 = AttemptNum;
-				}
-				else{
-					outcome_2 = wordleLoop_double();
-					AttemptNum_2 = AttemptNum;
-				}
-				end = clock();
-				float time = (end - start) / CLOCKS_PER_SEC;
-				if(round == 1){
-					time_1 = time;
-				}
-				else{
-					time_2 = time;
-				}
-				printf("time%d = %2f seconds\n\n", round,time);
-		    }
-			else{
-				printf("Invalid answer!!!\nRestart the game.\n" EOL);
-				return 0;
-			}
-		}	
-		if(outcome_1 == 0 && outcome_2 == 1){
-			printf("Player 1 win the game!");
-		}
-		else if(outcome_1 == 1 && outcome_2 == 0){
-			printf("Player 2 win the game!");
-		}
-		else if(outcome_1 == 0 && outcome_2 == 0){
-			printf("The game is tied!");
-		} 
-		else{
-			if(AttemptNum_1 < AttemptNum_2){
-				printf("Player 2 win the game for fewer attempts!");
-			}
-			else if(AttemptNum_1 > AttemptNum_2){
-				printf("Player 1 win the game for fewer attempts!");
-			}
-			else{
-				if(time_1 == time_2){
-					printf("The game is tied!");
-				}
-				else if(time_1 <time_2){
-					printf("Player 2 win the game for using less time!");
-				}
-				else{
-					printf("Player 1 win the game for using less time!");
-				}
-			}
-		return 1;
-		}
-	}
-	//Error
-	else {
-		return -1;
-	}
+std::vector<std::string> readWords(const std::string &path) {
+    std::ifstream input(path);
+    std::vector<std::string> words;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::string word = trimAndLower(line);
+        if (word.size() == kWordLength) {
+            words.push_back(word);
+        }
+    }
+    return words;
 }
 
+Dictionary loadDictionary() {
+    Dictionary dictionary;
+    dictionary.solutions = readWords(kSolutionFile);
+    std::vector<std::string> allWords = readWords(kAllWordsFile);
 
-void Answer(char *word, int Len){
-    char ch;
-    int i = 0;
-    while(i<Len)
-    {
-        ch = getch();
-        //Press the 'Enter' button 
-        if(ch == '\r'){  
-            printf("\n");
+    for (const std::string &word : allWords) {
+        dictionary.allowed.insert(word);
+    }
+    for (const std::string &word : dictionary.solutions) {
+        dictionary.allowed.insert(word);
+    }
+
+    if (dictionary.solutions.empty() || dictionary.allowed.empty()) {
+        throw std::runtime_error("Cannot load word lists. Keep ALL.TXT and SOLUTION.TXT next to the program.");
+    }
+    return dictionary;
+}
+
+bool isAllLetters(const std::string &word) {
+    return word.size() == kWordLength &&
+           std::all_of(word.begin(), word.end(), [](unsigned char ch) { return std::isalpha(ch); });
+}
+
+GuessResult scoreGuess(const std::string &guess, const std::string &answer) {
+    GuessResult result;
+    std::array<int, 26> remaining{};
+
+    for (int i = 0; i < kWordLength; ++i) {
+        if (guess[i] == answer[i]) {
+            result.marks[i] = 2;
+        } else {
+            remaining[answer[i] - 'a']++;
+        }
+    }
+
+    for (int i = 0; i < kWordLength; ++i) {
+        if (result.marks[i] == 2) {
+            continue;
+        }
+        int idx = guess[i] - 'a';
+        if (idx >= 0 && idx < 26 && remaining[idx] > 0) {
+            result.marks[i] = 1;
+            remaining[idx]--;
+        }
+    }
+    return result;
+}
+
+std::string coloredTile(char ch, int mark) {
+    const char *color = mark == 2 ? kGreen : (mark == 1 ? kYellow : kGray);
+    std::string tile = color;
+    tile += ' ';
+    tile += static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    tile += ' ';
+    tile += kReset;
+    return tile;
+}
+
+void printBoard(const std::vector<std::string> &guesses, const std::vector<GuessResult> &results) {
+    std::cout << "\nBoard\n";
+    for (std::size_t row = 0; row < guesses.size(); ++row) {
+        std::cout << "  ";
+        for (int col = 0; col < kWordLength; ++col) {
+            std::cout << coloredTile(guesses[row][col], results[row].marks[col]);
+        }
+        std::cout << '\n';
+    }
+    for (std::size_t row = guesses.size(); row < kMaxTries; ++row) {
+        std::cout << "  ";
+        for (int col = 0; col < kWordLength; ++col) {
+            std::cout << kGray << "   " << kReset;
+        }
+        std::cout << '\n';
+    }
+}
+
+void printKeyboard(const std::unordered_map<char, int> &keyboard) {
+    const std::vector<std::string> rows = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+    std::cout << "\nKeyboard\n";
+    for (const std::string &row : rows) {
+        std::cout << "  ";
+        for (char ch : row) {
+            auto found = keyboard.find(ch);
+            if (found == keyboard.end()) {
+                std::cout << ' ' << static_cast<char>(std::toupper(ch)) << ' ';
+            } else {
+                std::cout << coloredTile(ch, found->second);
+            }
+        }
+        std::cout << '\n';
+    }
+}
+
+void updateKeyboard(std::unordered_map<char, int> &keyboard, const std::string &guess, const GuessResult &result) {
+    for (int i = 0; i < kWordLength; ++i) {
+        char ch = guess[i];
+        auto existing = keyboard.find(ch);
+        if (existing == keyboard.end() || result.marks[i] > existing->second) {
+            keyboard[ch] = result.marks[i];
+        }
+    }
+}
+
+std::string emojiShare(const GameResult &game, bool dailyMode) {
+    std::ostringstream out;
+    out << "Wordle in C++ " << (dailyMode ? "Daily " : "")
+        << (game.won ? std::to_string(game.attempts) : "X") << "/" << kMaxTries << "\n";
+    for (const GuessResult &result : game.results) {
+        for (int mark : result.marks) {
+            out << (mark == 2 ? "ðŸŸ©" : (mark == 1 ? "ðŸŸ¨" : "â¬›"));
+        }
+        out << '\n';
+    }
+    return out.str();
+}
+
+Stats loadStats() {
+    Stats stats;
+    std::ifstream input(kStatsFile);
+    if (!input) {
+        return stats;
+    }
+    input >> stats.played >> stats.wins >> stats.currentStreak >> stats.bestStreak;
+    for (int i = 1; i <= kMaxTries; ++i) {
+        input >> stats.distribution[i];
+    }
+    return stats;
+}
+
+void saveStats(const Stats &stats) {
+    std::ofstream output(kStatsFile);
+    output << stats.played << ' ' << stats.wins << ' ' << stats.currentStreak << ' ' << stats.bestStreak << '\n';
+    for (int i = 1; i <= kMaxTries; ++i) {
+        output << stats.distribution[i] << (i == kMaxTries ? '\n' : ' ');
+    }
+}
+
+void updateStats(const GameResult &game) {
+    if (game.quietAnswer) {
+        return;
+    }
+    Stats stats = loadStats();
+    stats.played++;
+    if (game.won) {
+        stats.wins++;
+        stats.currentStreak++;
+        stats.bestStreak = std::max(stats.bestStreak, stats.currentStreak);
+        stats.distribution[game.attempts]++;
+    } else {
+        stats.currentStreak = 0;
+    }
+    saveStats(stats);
+}
+
+void printStats() {
+    Stats stats = loadStats();
+    double winRate = stats.played == 0 ? 0.0 : (100.0 * stats.wins / stats.played);
+    std::cout << "\nStats\n"
+              << "  Played: " << stats.played << '\n'
+              << "  Wins: " << stats.wins << " (" << std::fixed << std::setprecision(1) << winRate << "%)\n"
+              << "  Current streak: " << stats.currentStreak << '\n'
+              << "  Best streak: " << stats.bestStreak << "\n\nDistribution\n";
+    int maxBucket = *std::max_element(std::begin(stats.distribution) + 1, std::end(stats.distribution));
+    for (int i = 1; i <= kMaxTries; ++i) {
+        int bars = maxBucket == 0 ? 0 : (30 * stats.distribution[i] / maxBucket);
+        std::cout << "  " << i << ": " << std::string(bars, '#') << " " << stats.distribution[i] << '\n';
+    }
+}
+
+std::string readLine(const std::string &prompt) {
+    std::cout << prompt;
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        return "exit";
+    }
+
+    auto first = std::find_if_not(line.begin(), line.end(), [](unsigned char ch) { return std::isspace(ch); });
+    auto last = std::find_if_not(line.rbegin(), line.rend(), [](unsigned char ch) { return std::isspace(ch); }).base();
+    if (first >= last) {
+        return "";
+    }
+
+    std::string out(first, last);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return out;
+}
+
+std::string readSecretLine(const std::string &prompt) {
+    std::cout << prompt;
+#ifdef _WIN32
+    std::string word;
+    for (;;) {
+        int ch = _getch();
+        if (ch == '\r' || ch == '\n') {
+            std::cout << '\n';
             break;
         }
-        //Press the 'Backspace' button
-        if(ch=='\b' && i>0){  
-            i--;
-            printf("\b \b");
-        }
-        //Input the string with '*' presented on the screen
-        else if(isprint(ch)){  
-            answer[i] = ch;
-            printf("*");
-            i++;
+        if (ch == '\b') {
+            if (!word.empty()) {
+                word.pop_back();
+                std::cout << "\b \b";
+            }
+        } else if (std::isprint(ch)) {
+            word.push_back(static_cast<char>(ch));
+            std::cout << '*';
         }
     }
-    answer[i] = 0;
+    return trimAndLower(word);
+#else
+    termios oldAttr{};
+    termios newAttr{};
+    tcgetattr(STDIN_FILENO, &oldAttr);
+    newAttr = oldAttr;
+    newAttr.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr);
+    std::string word;
+    std::getline(std::cin, word);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr);
+    std::cout << '\n';
+    return trimAndLower(word);
+#endif
 }
 
+bool satisfiesHardMode(const std::string &guess,
+                       const std::vector<std::string> &previousGuesses,
+                       const std::vector<GuessResult> &previousResults,
+                       std::string &message) {
+    std::array<char, kWordLength> fixed{};
+    std::array<int, 26> required{};
 
-void playMusic(){
-	//!!!precondition£ºin Dev-C++£¬Tools£­Compiler Options£­General£­linker-caller£ºadd ' -lwinmm'(a space is neended before -lwinmm) )
-	//the music must be'.wav' file
-	//enter certain	file path
-	PlaySound(TEXT("E:\\music01.wav"),  NULL, SND_FILENAME | SND_ASYNC| SND_LOOP);
-	printf("now playing : Go Home\n" EOL) ;
-	}
-
-
-int menu(){
-	printf("Please read the game description in 'introduction' carefully before your first game. \n"EOL);
-	char Buffer[21];
- 	int scan = 0;
-	puts(
-  	"Menu:" EOL
-  	"\tPlease choose:" EOL
-  	"\tsingle:  single player mode" EOL
-  	"\tdouble:  double player mode" EOL
-  	"\thelp:  information about the game" EOL
-  	"\texit:  end game"EOL);
- 	while (true) {
-  		puts("Please enter your choice:");
- 			while ((scan = scanf("%20s", Buffer)) != 1) {
-  				if (scan == EOF) {
-   					return -1;
-   				}
-  			}
-  			if (strcmp(Buffer, "exit") == 0) {
-   				return -1;
-  			}
-  			else if (strcmp(Buffer, "help") == 0) {
-   				help();
-  			}
-  			else if (strcmp(Buffer, "single") == 0) {
-   				return 1;
-  			}
-  			else if (strcmp(Buffer, "double") == 0) {
-   				return 0;
-  			}
-  			else {
-  				 puts("Invalid input");
-  			}
- 	}
-}
-
-
-void random(){
-    if ((fpA != NULL) && (fpS != NULL)){
-		char s[6] = { 1,1,1,1,1 };
-        int i,a = 0;
-        //Measure the number of answers in the text
-        for (i = 1; feof(fpS) == 0; i++) {
-            while (a <= 5) {
-    			s[a] = fgetc(fpS);
-    			a++;
-   			}
-  			 a = 0;
- 		 }
-  		//Initialize the pointer position
-  		fseek(fpS, 0, SEEK_SET);
-  		//Initialize the random number generator
-  		srand(time(NULL));   
-  		//Random Seed£¬get random numbers
-  		//Randomly get a answer
-  		int e = rand() % i;
-  		for (i = 1; i < e; i++) {
-   			while (a <= 5) {
-    			s[a] = fgetc(fpS);
-   				 a++;
-  			 }
-  			a = 0;
-  		}
-  		//put the localized character into 'answer'
-  		for (int i = 0; i <= answer_LENGTH; i++) {
-  			 answer[i] = fgetc(fpS);
-  		}
-  		//Pointer position initialization
-  		fseek(fpS, 0, SEEK_SET);
-  		printf("\n");
-  		#if debug
- 		//puts(answer);
- 		#endif
-	}
-}
-
-
-int answerChecker(const char *guess){
-	int i = 0;
-	char copy[answer_LENGTH + 1];
-	char outcome[answer_LENGTH + 1] ="";
-    //set up a copy of 'answer' to avoid wrong reports for double letters, for example "l" in "balls"
-	for (int t = 0; t < answer_LENGTH + 1; t++) {
-		copy[t] = answer[t];
-	}
-	for (int t = 0; guess[t] != '\0'; t++) {
-		//character found and position right
-		if (guess[t] == copy[t]) {
-			//SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), FOREGROUND_GREEN);
-			outcome[t] = guess[t];
-			printf("\033[48;5;2m%c\033[m", outcome[t]);
-			copy[t] = '_';
-		}
-		else {
-			int flag = 0;
-			for (int h = 0; h < answer_LENGTH + 1; h++) {
-				//character found but position wrong
-				if (guess[t] == copy[h]) {
-					//SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), FOREGROUND_RED | FOREGROUND_GREEN);
-					outcome[t] = guess[t];
-					printf("\033[48;5;3m%c\033[m", outcome[t]);
-					flag = 1;
-					break;
-				}
-				else {
-					continue;
-				}
-			}
-			//character not found
-			if(flag == 0) {
-				//SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), FOREGROUND_RED);
-				outcome[t] = guess[t];
-				printf("\033[48;5;1m%c\033[m", outcome[t]);
-			}
-		}
-	}
-	return 1;
-}
-
-
-int toLower(char* str){
-	int i = 0;
-	int len;
-	len = strlen(str);
-	for (i = 0; i < len; i++) {
-		str[i] = tolower(str[i]);
-	}
-	return 0;
-}
-
-
-int allLetter(const char* answer){
-    int sum = 0;
-    if(strlen(answer) == answer_LENGTH){
-    	int i;
-        for (i=0;i<answer_LENGTH;i++){
-            if(answer[i]>='a' && answer[i]<='z'){
-                sum += 1;
+    for (std::size_t row = 0; row < previousGuesses.size(); ++row) {
+        std::array<int, 26> rowRequired{};
+        for (int col = 0; col < kWordLength; ++col) {
+            int mark = previousResults[row].marks[col];
+            char ch = previousGuesses[row][col];
+            if (mark == 2) {
+                fixed[col] = ch;
+                rowRequired[ch - 'a']++;
+            } else if (mark == 1) {
+                rowRequired[ch - 'a']++;
             }
         }
-        if (sum == answer_LENGTH){
-            return 1;
+        for (int i = 0; i < 26; ++i) {
+            required[i] = std::max(required[i], rowRequired[i]);
         }
     }
-    return 0;
-}
 
-
-int inList(const char * answer){
-    //Buffer also contains '\n'
-    char Buffer[answer_LENGTH + 4];
-    if (answer != NULL && strlen(answer) == answer_LENGTH && allLetter(answer)) {
-        //search from the answers with the same start
-        fseek(fpA, MemCache[answer[0]-97], SEEK_SET); //ASCII of 'a' :97
-        int stop = answer[0] + 1,tot = 0;
-        char answers[ALL_SIZE][answer_LENGTH + 1];
-        while (fgets(Buffer, answer_LENGTH + 4, fpA) && Buffer[0] < stop){
-            Buffer[answer_LENGTH] = '\0';
-             //get a valid answer to compare
-            strcpy(answers[tot++], Buffer);
-        }
-        int low = 0, high = tot - 1,mid = 0,cmp = 0;
-        while (low <= high){
-            mid = (low + high) / 2;
-            cmp = strcmp(answer, answers[mid]);
-            if (cmp == 0){
-                return 1; 
-				//the supplied answer is in the list
-            }else if (cmp < 0){
-                high = mid - 1;
-            }else{
-                low = mid + 1;
-            }
+    for (int col = 0; col < kWordLength; ++col) {
+        if (fixed[col] != '\0' && guess[col] != fixed[col]) {
+            message = "Hard mode: position " + std::to_string(col + 1) + " must be '" + fixed[col] + "'.";
+            return false;
         }
     }
-    return 0;
+
+    std::array<int, 26> counts{};
+    for (char ch : guess) {
+        counts[ch - 'a']++;
+    }
+    for (int i = 0; i < 26; ++i) {
+        if (counts[i] < required[i]) {
+            message = "Hard mode: your guess must reuse the revealed letter '" + std::string(1, char('a' + i)) + "'.";
+            return false;
+        }
+    }
+    return true;
 }
 
-
-int pickAnswer(char * answer, int index){
-	int i = 0;
-	fseek(fpS, 0, SEEK_SET);
-	while (i <= index && fgets(answer, answer_LENGTH + 1, fpS) != NULL) {
-		if (strlen(answer) == answer_LENGTH) {
-			++i;
-		}
-	}
-	return index;
+std::string chooseRandomAnswer(const std::vector<std::string> &solutions) {
+    std::random_device device;
+    std::mt19937 rng(device());
+    std::uniform_int_distribution<std::size_t> dist(0, solutions.size() - 1);
+    return solutions[dist(rng)];
 }
 
+std::string chooseDailyAnswer(const std::vector<std::string> &solutions) {
+    using days = std::chrono::duration<long long, std::ratio<86400>>;
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    long long day = std::chrono::duration_cast<days>(now).count();
+    return solutions[static_cast<std::size_t>(day % static_cast<long long>(solutions.size()))];
+}
 
-void wordleLoop_single(){
-    char guess[answer_LENGTH + 10] = {0};
-    int AttemptNum = 0;
-    int in = 0;
-    answer[5]='\0';
-    puts("answer\tunused alphabet");
-    while (AttemptNum < MAX_TRIES){
-        if (!strcmp(guess, answer)){
+GameResult playGame(const Dictionary &dictionary, const std::string &answer, GameOptions options) {
+    GameResult game;
+    game.answer = answer;
+    game.quietAnswer = options.quietAnswer;
+    std::unordered_map<char, int> keyboard;
+    auto start = std::chrono::steady_clock::now();
+
+    std::cout << "\nGuess a " << kWordLength << "-letter word in " << kMaxTries << " tries."
+              << (options.hardMode ? " Hard mode is ON." : "") << "\n";
+
+    while (game.guesses.size() < kMaxTries) {
+        printBoard(game.guesses, game.results);
+        printKeyboard(keyboard);
+        std::string guess = readLine("\nGuess " + std::to_string(game.guesses.size() + 1) + ": ");
+
+        if (guess == "quit") {
             break;
-    	}
-        printf("\nGuess %i: ", AttemptNum + 1);
-        if ((in = scanf("%s", guess)) == 1 && strlen(guess) == answer_LENGTH ){
-            toLower(guess);
-            if (strcmp(guess, answer)){
-                if (allLetter(guess) && inList(guess)){
-                    AttemptNum++;
-                    if (answerChecker(guess)){
-                        int i;
-                        //when the character found in alpha , replace it with '_'
-                        for(i = 0;i < answer_LENGTH + 1;i++){
-                        	int t;
-                            for(t = 0;t < ALPHA_SIZE - 1;t++){
-                                if(alpha[t] == guess[i]){
-                                    alpha[t] = '_';
-                                }
-                            }
-                        }
-                        printf("\t");
-                        int q;
-                        for(q = 0;q < ALPHA_SIZE + 1;q++){
-                        	if(alpha[q] == '_'){
-                        		printf("\033[48;5;1m%c\033[m",ALPHA[q]);
-							}
-							else{
-								printf("%c",alpha[q]);
-							}
-						}
-						#if debug
-                        //printf("\t%s\n", alpha);
-                        #endif
-                    }
-                } else {
-                    puts("answer is not in list!");
-					fflush(stdin);
-                }
-            }
-        } 
-		else {
-            if (in == EOF) {
-                exit(EXIT_FAILURE);
-            }
-            printf("\nInvalid answer. Must be %i characters\n", answer_LENGTH);
         }
-    }
-    if (!strcmp(guess, answer)){
-        printf("\nYou win!\n");
-    } 
-	else {
-        printf("\nYou lose. The answer was %s\n",answer);
-    }
-}
+        if (!isAllLetters(guess)) {
+            std::cout << kRed << " Please enter exactly five letters. " << kReset << "\n";
+            continue;
+        }
+        if (!dictionary.allowed.count(guess)) {
+            std::cout << kRed << " That word is not in the dictionary. " << kReset << "\n";
+            continue;
+        }
+        std::string hardModeMessage;
+        if (options.hardMode && !satisfiesHardMode(guess, game.guesses, game.results, hardModeMessage)) {
+            std::cout << kRed << ' ' << hardModeMessage << ' ' << kReset << "\n";
+            continue;
+        }
 
+        GuessResult result = scoreGuess(guess, answer);
+        game.guesses.push_back(guess);
+        game.results.push_back(result);
+        updateKeyboard(keyboard, guess, result);
+        game.attempts = static_cast<int>(game.guesses.size());
 
-int wordleLoop_double(){
-    char guess[answer_LENGTH + 10] = {0};
-    AttemptNum = 0;
-    int in = 0;
-    answer[5]='\0';
-    puts("answer\tunused alphabet");
-    while (AttemptNum < MAX_TRIES){
-        if (!strcmp(guess, answer)){
+        if (guess == answer) {
+            game.won = true;
             break;
-    	}
-        printf("\nGuess %i: ", AttemptNum + 1);
-        if ((in = scanf("%s", guess)) == 1 && strlen(guess) == answer_LENGTH ){
-            toLower(guess);
-            if (strcmp(guess, answer)){
-                if (allLetter(guess) && inList(guess)){
-                    AttemptNum++;
-                    if (answerChecker(guess)){
-                        int i;
-                        //when the character found in alpha , replace it with '_'
-                        for(i = 0;i < answer_LENGTH + 1;i++){
-                        	int t;
-                            for(t = 0;t < ALPHA_SIZE - 1;t++){
-                                if(alpha[t] == guess[i]){
-                                    alpha[t] = '_';
-                                }
-                            }
-                        }
-                        printf("\t"); 
-                        int q;
-                        for(q = 0;q < ALPHA_SIZE + 1;q++){
-                        	if(alpha[q] == '_'){
-                        		printf("\033[48;5;1m%c\033[m",ALPHA[q]);
-							}
-							else{
-								printf("%c",alpha[q]);
-							}
-						}
-                    }
-                } else {
-                    puts("answer is not in list!");
-					fflush(stdin);
-                }
-            }
-        } 
-		else {
-            if (in == EOF) {
-                exit(EXIT_FAILURE);
-            }
-            printf("\nInvalid answer. Must be %i characters\n", answer_LENGTH);
         }
     }
-    if (!strcmp(guess, answer)){
-        printf("\nSuccess\n");
-        return 1;
-    } 
-	else {
-        printf("\nFailure. The answer was %s\n",answer);
-        return 0;
+
+    printBoard(game.guesses, game.results);
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+    if (game.won) {
+        std::cout << "\nYou win in " << game.attempts << " tries! Time: " << elapsed << "s\n";
+    } else {
+        std::cout << "\nYou lose. The answer was " << answer << ". Time: " << elapsed << "s\n";
+    }
+    std::cout << "\nShare card:\n" << emojiShare(game, options.dailyMode);
+    updateStats(game);
+    return game;
+}
+
+void printHelp() {
+    std::cout << R"(
+Wordle in C++ Plus
+------------------
+- Green means the letter is correct and in the correct position.
+- Yellow means the answer contains that letter, but somewhere else.
+- Gray means the answer does not contain that letter in this amount.
+- Hard mode forces you to reuse all revealed hints.
+- Daily mode picks a stable answer for the current UTC day.
+- Type 'quit' during a round to give up.
+)";
+}
+
+void duel(const Dictionary &dictionary) {
+    std::cout << "\nDuel mode: each player secretly enters a valid answer for the other player.\n";
+    GameResult results[2];
+    for (int round = 0; round < 2; ++round) {
+        int setter = round + 1;
+        int guesser = 2 - round;
+        std::string answer;
+        do {
+            answer = readSecretLine("Player " + std::to_string(setter) + ", enter a secret answer for Player " + std::to_string(guesser) + ": ");
+            if (!isAllLetters(answer) || !dictionary.allowed.count(answer)) {
+                std::cout << "Invalid secret answer. It must be a valid five-letter dictionary word.\n";
+            }
+        } while (!isAllLetters(answer) || !dictionary.allowed.count(answer));
+
+        GameOptions options;
+        options.quietAnswer = true;
+        results[round] = playGame(dictionary, answer, options);
+    }
+
+    std::cout << "\nDuel result\n";
+    if (results[0].won != results[1].won) {
+        std::cout << "Player " << (results[0].won ? 2 : 1) << " wins!\n";
+    } else if (!results[0].won) {
+        std::cout << "Both players missed. It is a tie.\n";
+    } else if (results[0].attempts != results[1].attempts) {
+        std::cout << "Player " << (results[0].attempts < results[1].attempts ? 2 : 1)
+                  << " wins with fewer attempts!\n";
+    } else {
+        std::cout << "Both players solved in " << results[0].attempts << " attempts. It is a tie.\n";
     }
 }
 
+void menu(const Dictionary &dictionary) {
+    for (;;) {
+        std::cout << R"(
+==============================
+      Wordle in C++ Plus
+==============================
+1. Random single-player game
+2. Daily challenge
+3. Duel mode
+4. Hard-mode random game
+5. Stats
+6. Help
+0. Exit
+)";
+        std::string choice = readLine("Choose: ");
+        if (choice == "0" || choice == "exit") {
+            return;
+        }
+        if (choice == "1") {
+            playGame(dictionary, chooseRandomAnswer(dictionary.solutions), GameOptions{});
+        } else if (choice == "2") {
+            GameOptions options;
+            options.dailyMode = true;
+            playGame(dictionary, chooseDailyAnswer(dictionary.solutions), options);
+        } else if (choice == "3") {
+            duel(dictionary);
+        } else if (choice == "4") {
+            GameOptions options;
+            options.hardMode = true;
+            playGame(dictionary, chooseRandomAnswer(dictionary.solutions), options);
+        } else if (choice == "5") {
+            printStats();
+        } else if (choice == "6" || choice == "help") {
+            printHelp();
+        } else {
+            std::cout << "Invalid choice.\n";
+        }
+    }
+}
 
-void help(){
-	printf(
-			"------------------------------------------------------------------------------------------------------------------------\n"
-	        "A brief introduction to 'wordle'\n"EOL
-	        "In 2022 ,the top search keyword in the global hot search content is 'Wordle'"
-	        "But our 'Wordle' is different (with more complete functions) to some extent."
-	        "There are two modes to be chosen:\n"
-			"1.Single player mode : \n\tThe computer picks a answer at random as the 'answer'\n"
-			"\tGuess the 5 letters of the answer within 6 tries,and then you win.\n"
-			"2.Double player mode £º\n\tOne player( answerle-maker ) enter a answer as the 'answer', the other( answerle-guesser ) guess the answer\n"
-			"\tThen the two players switch roles.\n"
-			"\tIf one of them guess out the answer successfully while the other fail,the one who succeed is the winner.\n "
-			"\tIf they both guess out the answer ,then check their number of attempts ,the player with less attempts is the winner.\n"
-			"\tIf they both guess out the answer with the same number of attempts ,then check their time ,the player using less time is the winner."
-			"\tOtherwise the game is tied\n"
-			"You can choose one mode.\n" EOL
-			);
-	puts(
-	    	"After every guess,each character will be shown in a certain color.\n" 
-		    "They will be presented like this:\n" 
-		    "  \033[48;5;1m  red  \033[m    means Character not found at all\n" 
-		    "  \033[48;5;2m green \033[m  means Character found and position correct\n"
-		    "  \033[48;5;3m yellow\033[m means Character found but position wrong\n" 
-		    "Unused letters of the alphabet are shown next to the hint\n" 
-		    "The game prefers valid positions over invalid positions,\n" 
-		    "And it handles double letters properly.\n" 
-		    "Guessing \"RATES\" when the answer is \"TESTS\" shows \"\033[48;5;1mRA\033[m\033[48;5;3mTE\033[m\033[48;5;2mS\033[m\"\n"
-			"------------------------------------------------------------------------------------------------------------------------\n"
-			);
+} // namespace
+
+int main() {
+    try {
+        Dictionary dictionary = loadDictionary();
+        menu(dictionary);
+        return EXIT_SUCCESS;
+    } catch (const std::exception &error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
 }
